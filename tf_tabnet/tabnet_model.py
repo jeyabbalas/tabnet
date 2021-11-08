@@ -240,26 +240,47 @@ class Split(tf.keras.layers.Layer):
 class AttentiveTransformer(tf.keras.layers.Layer):
     def __init__(
         self, 
-        units: int, 
-        mask_type: str = "sparsemax", 
-        relaxation_factor: float = 1.3, 
-        instance_norm: bool = False, 
+        units: int = 8, 
         virtual_batch_size: Optional[int] = None, 
         momentum: float = 0.98, 
+        groups: Optional[int] = None, 
+        mask_type: str = "sparsemax", 
         **kwargs
     ):
         """
-        Creates an Attentive Transformer that learns to select features and output a 
-        mask to select features to pay attention to for further analysis.
+        Creates an Attentive Transformer that learns masks to select features 
+        to pay attention to for further analysis.
+
+        Parameters:
+        -----------
+        units: int
+            Number of units in layer. Default (8).
+        mask_type: str
+            mask_type ∈ {"softmax", "entmax", "sparsemax"}. Softmax generates a dense mask.
+            Entmax (i.e. entmax 1.5) generates a slightly sparser mask. Sparsemax generates 
+            a highly sparse mask. To learn more, refer: https://arxiv.org/abs/1905.05702.
+        virtual_batch_size: int
+            Batch size for Ghost Batch Normalization (GBN). Value should be much smaller 
+            than and a factor of the overall batch size. Default (None) runs regular batch 
+            normalization. If an integer value is specified, GBN is run with that virtual 
+            batch size.
+        momentum: float
+            Momentum for exponential moving average in batch normalization. Lower values 
+            correspond to larger impact of batch on the rolling statistics computed in 
+            each batch. Valid values range from 0.0 to 1.0. Default (0.98).
+        groups: int
+            Number of groups for Group Normalization. Default (None) runs either regular 
+            batch normalization or Ghost Batch Normalization depending upon the value of 
+            virtual_batch_size. If an integer value is specified, Group Normalization is 
+            run with that number of groups. For Layer Normalization, set group=1. For 
+            Instance Normalization, set group=-1.
         """
         super(AttentiveTransformer, self).__init__(**kwargs)
-        self.fc = tf.keras.layers.Dense(units, use_bias=False)
+        self.virtual_batch_size = virtual_batch_size
+        self.momentum = momentum
+        self.groups = groups
 
-        if not instance_norm: # Ghost Batch Normalization (default)
-            self.bn = tf.keras.layers.BatchNormalization(virtual_batch_size=virtual_batch_size, 
-                                                         momentum=momentum)
-        else: # Instance Normalization
-            self.bn = tfa.layers.GroupNormalization(groups=-1)
+        self.fc = tf.keras.layers.Dense(units, use_bias=False)
 
         if mask_type == "sparsemax": # Sparsemax
             self.sparse_activation = tfa.activations.sparsemax(axis=-1)
@@ -272,13 +293,29 @@ class AttentiveTransformer(tf.keras.layers.Layer):
                 "Available options for mask_type: {'sparsemax', 'entmax', 'softmax'}"
             )
         
-        def call(self, inputs: Union[tf.Tensor, np.ndarray], 
-                 priors: Optional[Union[tf.Tensor, np.ndarray]], 
-                 training: Optional[bool] = None):
-            x = self.fc(inputs)
-            x = self.bn(x)
-            x = self.sparse_activation(x)
-            return x
+    def build(
+        self, 
+        input_shape: tf.TensorShape
+    ):
+        if self.groups: # Group Normalization
+            if self.groups == -1:
+                self.groups = input_shape[-1]
+            self.bn = tfa.layers.GroupNormalization(groups=self.groups)
+        else: # Batch Normalization
+            self.bn = tf.keras.layers.BatchNormalization(virtual_batch_size=self.virtual_batch_size, 
+                                                         momentum=self.momentum)
+        
+    def call(
+        self, 
+        inputs: Union[tf.Tensor, np.ndarray], 
+        priors: Optional[Union[tf.Tensor, np.ndarray]], 
+        training: Optional[bool] = None, 
+    ):
+        x = self.fc(inputs)
+        x = self.bn(x, training=training)
+        x = tf.multiply(priors, x)
+        x = self.sparse_activation(x)
+        return x
 
 
 class TabNetEncoder(tf.keras.layers.Layer):
@@ -352,10 +389,9 @@ class TabNetEncoder(tf.keras.layers.Layer):
             a highly sparse mask. To learn more, refer: https://arxiv.org/abs/1905.05702.
         """
         super(TabNetEncoder, self).__init__(**kwargs)
-        self.momentum = momentum
 
         # plain batch normalization
-        self.initial_bn = tf.keras.layers.BatchNormalization(momentum=self.momentum)
+        self.initial_bn = tf.keras.layers.BatchNormalization(momentum=momentum)
 
         # shared glu block
         self.shared_glu_block = None
@@ -370,7 +406,6 @@ class TabNetEncoder(tf.keras.layers.Layer):
         
         # initial feature transformer
         self.initial_feature_transformer = FeatureTransformer(
-            n_shared_glus=n_shared_glus, 
             n_dependent_glus=n_dependent_glus, 
             shared_layers=self.shared_glu_block, 
             units=decision_dim+attention_dim, 
@@ -379,12 +414,33 @@ class TabNetEncoder(tf.keras.layers.Layer):
             groups=groups, 
         )
 
+        # split layer
+        self.split_layer = Split(split_dim=decision_dim)
+
+        # feature and attentive transformers per step
+        self.step_feature_transformers = list()
+        self.step_attentive_transformers = list()
+        for step in range(n_steps):
+            feature_transformer = FeatureTransformer(
+                n_dependent_glus=n_dependent_glus, 
+                shared_layers=self.shared_glu_block, 
+                units=decision_dim+attention_dim, 
+                virtual_batch_size=virtual_batch_size, 
+                momentum=momentum, 
+                groups=groups, 
+            )
+            self.step_feature_transformers.append(
+                feature_transformer
+            )
+
     def call(
         self, 
         inputs: Union[tf.Tensor, np.ndarray], 
+        training: Optional[bool] = None, 
     ):
-        x = self.initial_bn(inputs)
-
+        feat = self.initial_bn(inputs, training=training)
+        x = self.initial_feature_transformer(feat, training=training)
+        x_d, x_a = self.split_layer(x)
 
 
 class TabNet(tf.keras.layers.Layer):

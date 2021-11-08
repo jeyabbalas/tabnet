@@ -74,7 +74,6 @@ class GLUBlock(tf.keras.layers.Layer):
     def __init__(
             self, 
             n_glu_layers: int = 2, 
-            omit_first_residual: bool = True, 
             units: int = 16, 
             virtual_batch_size: Optional[int] = None, 
             momentum: float = 0.98, 
@@ -88,11 +87,6 @@ class GLUBlock(tf.keras.layers.Layer):
         -----------
         n_glu_layers: int
             Number of GLU (FC-BN-GLU) layers. Should be greater than 0. Default (2).
-        omit_first_residual: boolean
-            Omit the residual connection from input to the first GLU layer's output? 
-            If this is the first GLU Block in your feature transformer, set this to True 
-            because the input and output dimension of the first GLU layer is likely to 
-            mismatch. So, input cannot be added to the output as residuals. Default (True).
         units: int
             Number of units in each GLU layer. Default (16).
         virtual_batch_size: int
@@ -115,29 +109,36 @@ class GLUBlock(tf.keras.layers.Layer):
         if n_glu_layers <= 0:
             raise ValueError("Invalid Argument: Number of GLU layers should be greater than 0.")
 
-        self.n_glu_layers = n_glu_layers
-        self.omit_first_residual = omit_first_residual
+        self.units = units
         self.norm_factor = tf.math.sqrt(tf.constant(0.5))
 
         # Building block components
         self.glu_layers = list()
-        for _ in range(self.n_glu_layers):
+        for _ in range(n_glu_layers):
             glu_layer = GLULayer(
-                units=units, 
+                units=self.units, 
                 virtual_batch_size=virtual_batch_size, 
                 momentum=momentum, 
                 groups=groups, 
             )
             self.glu_layers.append(glu_layer)
     
+    def build(
+        self, 
+        input_shape: tf.TensorShape, 
+    ):
+        if input_shape[-1] != self.units:
+            self.omit_first_residual = True
+        else: 
+            self.omit_first_residual = False
+    
     def call(
         self, 
         inputs: Union[tf.Tensor, np.ndarray], 
         training: Optional[bool] = None, 
     ) -> tf.Tensor:
-
-        for i in range(self.n_glu_layers):
-            x = self.glu_layers[i](inputs, training=training)
+        for i, glu_layer in enumerate(self.glu_layers):
+            x = glu_layer(inputs, training=training)
             if self.omit_first_residual and (i==0):
                 inputs = x
             else:
@@ -150,18 +151,66 @@ class GLUBlock(tf.keras.layers.Layer):
 class FeatureTransformer(tf.keras.layers.Layer):
     def __init__(
             self, 
+            n_dependent_glus: int = 2, 
+            shared_layers: Optional[GLUBlock] = None, 
             units: int = 16, 
-            instance_norm: bool = False, 
             virtual_batch_size: Optional[int] = None, 
             momentum: float = 0.98, 
+            groups: Optional[int] = None, 
+            **kwargs
     ):
         """
         Creates a Feature Transformer for non-linear processing of features.
 
         Parameters:
         -----------
+        n_dependent_glus: int
+            Number of step-dependent GLU layers within the Feature Transformer. Increasing 
+            the number of step-dependent layers is an effective strategy to improve predictive 
+            performance. Default (2).
+        shared_layers: GLUBlock
+            GLU block that is shared among all feature transformers. Default (None).
+        units: int
+            Number of units in each GLU layer. Default (16).
+        virtual_batch_size: int
+            Batch size for Ghost Batch Normalization (GBN). Value should be much smaller 
+            than and a factor of the overall batch size. Default (None) runs regular batch 
+            normalization. If an integer value is specified, GBN is run with that virtual 
+            batch size.
+        momentum: float
+            Momentum for exponential moving average in batch normalization. Lower values 
+            correspond to larger impact of batch on the rolling statistics computed in 
+            each batch. Valid values range from 0.0 to 1.0. Default (0.98).
+        groups: int
+            Number of groups for Group Normalization. Default (None) runs either regular 
+            batch normalization or Ghost Batch Normalization depending upon the value of 
+            virtual_batch_size. If an integer value is specified, Group Normalization is 
+            run with that number of groups. For Layer Normalization, set group=1. For 
+            Instance Normalization, set group=-1.
         """
-        super(FeatureTransformer, self).__init__()
+        super(FeatureTransformer, self).__init__(**kwargs)
+        self.shared_layers = shared_layers
+        self.dependent_layers = None
+        if n_dependent_glus > 0:
+            self.dependent_layers = GLUBlock(
+                n_glu_layers=n_dependent_glus, 
+                units=units, 
+                virtual_batch_size=virtual_batch_size, 
+                momentum=momentum, 
+                groups=groups, 
+            )
+    
+    def call(
+        self, 
+        inputs: Union[tf.Tensor, np.ndarray], 
+        training: Optional[bool] = None, 
+    ) -> tf.Tensor:
+        x = inputs
+        if not self.shared_layers:
+            x = self.shared_layers(x, training=training)
+        if not self.dependent_layers:
+            x = self.dependent_layers(x, training=training)
+        return x
 
 
 class Split(tf.keras.layers.Layer):
@@ -309,17 +358,26 @@ class TabNetEncoder(tf.keras.layers.Layer):
         self.initial_bn = tf.keras.layers.BatchNormalization(momentum=self.momentum)
 
         # shared glu block
+        self.shared_glu_block = None
         if n_shared_glus > 0:
             self.shared_glu_block = GLUBlock(
                 n_glu_layers=n_shared_glus, 
-                omit_first_residual=True, 
                 units=decision_dim+attention_dim, 
                 virtual_batch_size=virtual_batch_size, 
                 momentum=momentum, 
                 groups=groups, 
             )
-        else:
-            self.shared_glu_block = tf.identity
+        
+        # initial feature transformer
+        self.initial_feature_transformer = FeatureTransformer(
+            n_shared_glus=n_shared_glus, 
+            n_dependent_glus=n_dependent_glus, 
+            shared_layers=self.shared_glu_block, 
+            units=decision_dim+attention_dim, 
+            virtual_batch_size=virtual_batch_size, 
+            momentum=momentum, 
+            groups=groups, 
+        )
 
     def call(
         self, 

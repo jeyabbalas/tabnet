@@ -12,7 +12,6 @@ class GLULayer(tf.keras.layers.Layer):
             units: int = 16, 
             virtual_batch_size: Optional[int] = None, 
             momentum: float = 0.98, 
-            groups: Optional[int] = None, 
             **kwargs
     ):
         """
@@ -32,32 +31,15 @@ class GLULayer(tf.keras.layers.Layer):
             Momentum for exponential moving average in batch normalization. Lower values 
             correspond to larger impact of batch on the rolling statistics computed in 
             each batch. Valid values range from 0.0 to 1.0. Default (0.98).
-        groups: int
-            Number of groups for Group Normalization. Default (None) runs either regular 
-            batch normalization or Ghost Batch Normalization depending upon the value of 
-            virtual_batch_size. If an integer value is specified, Group Normalization is 
-            run with that number of groups. For Layer Normalization, set group=1. For 
-            Instance Normalization, set group=-1.
         """
         super(GLULayer, self).__init__(**kwargs)
         self.units = units
         self.virtual_batch_size = virtual_batch_size
         self.momentum = momentum
-        self.groups = groups
 
         self.fc = tf.keras.layers.Dense(self.units*2, use_bias=False)
-
-    def build(
-        self, 
-        input_shape: tf.TensorShape, 
-    ):
-        if self.groups: # Group Normalization
-            if self.groups == -1:
-                self.groups = input_shape[-1]
-            self.bn = tfa.layers.GroupNormalization(groups=self.groups)
-        else: # Batch Normalization
-            self.bn = tf.keras.layers.BatchNormalization(virtual_batch_size=self.virtual_batch_size, 
-                                                         momentum=self.momentum)
+        self.bn = tf.keras.layers.BatchNormalization(virtual_batch_size=self.virtual_batch_size, 
+                                                     momentum=self.momentum)
     
     def call(
         self, 
@@ -77,7 +59,6 @@ class GLUBlock(tf.keras.layers.Layer):
             units: int = 16, 
             virtual_batch_size: Optional[int] = None, 
             momentum: float = 0.98, 
-            groups: Optional[int] = None, 
             **kwargs
     ):
         """
@@ -98,12 +79,6 @@ class GLUBlock(tf.keras.layers.Layer):
             Momentum for exponential moving average in batch normalization. Lower values 
             correspond to larger impact of batch on the rolling statistics computed in 
             each batch. Valid values range from 0.0 to 1.0. Default (0.98).
-        groups: int
-            Number of groups for Group Normalization. Default (None) runs either regular 
-            batch normalization or Ghost Batch Normalization depending upon the value of 
-            virtual_batch_size. If an integer value is specified, Group Normalization is 
-            run with that number of groups. For Layer Normalization, set group=1. For 
-            Instance Normalization, set group=-1.
         """
         super(GLUBlock, self).__init__(**kwargs)
         if n_glu_layers <= 0:
@@ -112,14 +87,12 @@ class GLUBlock(tf.keras.layers.Layer):
         self.units = units
         self.norm_factor = tf.math.sqrt(tf.constant(0.5))
 
-        # Building block components
         self.glu_layers = list()
         for _ in range(n_glu_layers):
             glu_layer = GLULayer(
                 units=self.units, 
                 virtual_batch_size=virtual_batch_size, 
                 momentum=momentum, 
-                groups=groups, 
             )
             self.glu_layers.append(glu_layer)
     
@@ -156,7 +129,6 @@ class FeatureTransformer(tf.keras.layers.Layer):
             units: int = 16, 
             virtual_batch_size: Optional[int] = None, 
             momentum: float = 0.98, 
-            groups: Optional[int] = None, 
             **kwargs
     ):
         """
@@ -181,12 +153,6 @@ class FeatureTransformer(tf.keras.layers.Layer):
             Momentum for exponential moving average in batch normalization. Lower values 
             correspond to larger impact of batch on the rolling statistics computed in 
             each batch. Valid values range from 0.0 to 1.0. Default (0.98).
-        groups: int
-            Number of groups for Group Normalization. Default (None) runs either regular 
-            batch normalization or Ghost Batch Normalization depending upon the value of 
-            virtual_batch_size. If an integer value is specified, Group Normalization is 
-            run with that number of groups. For Layer Normalization, set group=1. For 
-            Instance Normalization, set group=-1.
         """
         super(FeatureTransformer, self).__init__(**kwargs)
         self.shared_layers = shared_layers
@@ -197,7 +163,6 @@ class FeatureTransformer(tf.keras.layers.Layer):
                 units=units, 
                 virtual_batch_size=virtual_batch_size, 
                 momentum=momentum, 
-                groups=groups, 
             )
     
     def call(
@@ -206,9 +171,9 @@ class FeatureTransformer(tf.keras.layers.Layer):
         training: Optional[bool] = None, 
     ) -> tf.Tensor:
         x = inputs
-        if not self.shared_layers:
+        if self.shared_layers:
             x = self.shared_layers(x, training=training)
-        if not self.dependent_layers:
+        if self.dependent_layers:
             x = self.dependent_layers(x, training=training)
         return x
 
@@ -243,7 +208,6 @@ class AttentiveTransformer(tf.keras.layers.Layer):
         units: int, 
         virtual_batch_size: Optional[int] = None, 
         momentum: float = 0.98, 
-        groups: Optional[int] = None, 
         mask_type: str = "sparsemax", 
         **kwargs
     ):
@@ -265,12 +229,6 @@ class AttentiveTransformer(tf.keras.layers.Layer):
             Momentum for exponential moving average in batch normalization. Lower values 
             correspond to larger impact of batch on the rolling statistics computed in 
             each batch. Valid values range from 0.0 to 1.0. Default (0.98).
-        groups: int
-            Number of groups for Group Normalization. Default (None) runs either regular 
-            batch normalization or Ghost Batch Normalization depending upon the value of 
-            virtual_batch_size. If an integer value is specified, Group Normalization is 
-            run with that number of groups. For Layer Normalization, set group=1. For 
-            Instance Normalization, set group=-1.
         mask_type: str
             mask_type ∈ {"softmax", "entmax", "sparsemax"}. Softmax generates a dense mask.
             Entmax (i.e. entmax 1.5) generates a slightly sparser mask. Default(sparsemax) 
@@ -280,9 +238,11 @@ class AttentiveTransformer(tf.keras.layers.Layer):
         super(AttentiveTransformer, self).__init__(**kwargs)
         self.virtual_batch_size = virtual_batch_size
         self.momentum = momentum
-        self.groups = groups
 
         self.fc = tf.keras.layers.Dense(units, use_bias=False)
+
+        self.bn = tf.keras.layers.BatchNormalization(virtual_batch_size=self.virtual_batch_size, 
+                                                     momentum=self.momentum)
 
         if mask_type == "sparsemax": # Sparsemax
             self.sparse_activation = tfa.activations.sparsemax(axis=-1)
@@ -295,18 +255,6 @@ class AttentiveTransformer(tf.keras.layers.Layer):
                 "Available options for mask_type: {'sparsemax', 'entmax', 'softmax'}"
             )
         
-    def build(
-        self, 
-        input_shape: tf.TensorShape, 
-    ):
-        if self.groups: # Group Normalization
-            if self.groups == -1:
-                self.groups = input_shape[-1]
-            self.bn = tfa.layers.GroupNormalization(groups=self.groups)
-        else: # Batch Normalization
-            self.bn = tf.keras.layers.BatchNormalization(virtual_batch_size=self.virtual_batch_size, 
-                                                         momentum=self.momentum)
-        
     def call(
         self, 
         inputs: Union[tf.Tensor, np.ndarray], 
@@ -318,20 +266,6 @@ class AttentiveTransformer(tf.keras.layers.Layer):
         x = tf.multiply(prior, x)
         x = self.sparse_activation(x)
         return x
-
-
-class AggregateFeatures(tf.keras.layers.Layer):
-    def __init__(
-        self, 
-        **kwargs
-    ):
-        super(AggregateFeatures, self).__init__(**kwargs)
-
-    def call(
-        self, 
-        inputs: Union[tf.Tensor, np.ndarray], 
-    ) -> tf.Tensor:
-        return tf.math.reduce_sum(inputs, axis=-1)
 
 
 class TabNetEncoder(tf.keras.layers.Layer):
@@ -347,7 +281,6 @@ class TabNetEncoder(tf.keras.layers.Layer):
         epsilon: float = 1e-15, 
         virtual_batch_size: Optional[int] = None, 
         momentum: float = 0.98, 
-        groups: Optional[int] = None, 
         mask_type: str = "sparsemax", 
         lambda_sparse: float = 1e-3, 
         **kwargs
@@ -394,12 +327,6 @@ class TabNetEncoder(tf.keras.layers.Layer):
             Momentum for exponential moving average in batch normalization. Lower values 
             correspond to larger impact of batch on the rolling statistics computed in 
             each batch. Valid values range from 0.0 to 1.0. Default (0.98).
-        groups: int
-            Number of groups for Group Normalization. Default (None) runs either regular 
-            batch normalization or Ghost Batch Normalization depending upon the value of 
-            virtual_batch_size. If an integer value is specified, Group Normalization is 
-            run with that number of groups. For Layer Normalization, set group=1. For 
-            Instance Normalization, set group=-1.
         mask_type: str
             mask_type ∈ {"softmax", "entmax", "sparsemax"}. Softmax generates a dense mask.
             Entmax (i.e. entmax 1.5) generates a slightly sparser mask. Default(sparsemax) 
@@ -416,7 +343,6 @@ class TabNetEncoder(tf.keras.layers.Layer):
         self.attention_dim = attention_dim
         self.virtual_batch_size = virtual_batch_size
         self.momentum = momentum
-        self.groups = groups
         self.mask_type = mask_type
 
         # plain batch normalization
@@ -430,7 +356,6 @@ class TabNetEncoder(tf.keras.layers.Layer):
                 units=self.decision_dim+self.attention_dim, 
                 virtual_batch_size=self.virtual_batch_size, 
                 momentum=self.momentum, 
-                groups=self.groups, 
             )
         
         # initial feature transformer
@@ -440,14 +365,14 @@ class TabNetEncoder(tf.keras.layers.Layer):
             units=self.decision_dim+self.attention_dim, 
             virtual_batch_size=self.virtual_batch_size, 
             momentum=self.momentum, 
-            groups=self.groups, 
             name="FeatureTransformer_Step_0", 
         )
 
         # split layer
         self.split_layer = Split(split_dim=decision_dim)
 
-        # aggregate layer
+        # final encoding layer
+        self.final_encoding = tf.keras.layers.Dense(units=output_dim, bias=False)
     
     def build(
         self, 
@@ -465,14 +390,12 @@ class TabNetEncoder(tf.keras.layers.Layer):
                 units=self.decision_dim+self.attention_dim, 
                 virtual_batch_size=self.virtual_batch_size, 
                 momentum=self.momentum, 
-                groups=self.groups, 
                 name=f"FeatureTransformer_Step_{(step+1)}", 
             )
             attentive_transformer = AttentiveTransformer(
                 units=input_dims, 
                 virtual_batch_size=self.virtual_batch_size, 
                 momentum=self.momentum, 
-                groups=self.groups, 
                 mask_type = self.mask_type, 
                 name=f"AttentiveTransformer_Step_{(step+1)}", 
             )
@@ -489,14 +412,16 @@ class TabNetEncoder(tf.keras.layers.Layer):
         prior: Union[tf.Tensor, np.ndarray] = None, 
         training: Optional[bool] = None, 
     ):
+        step_output_aggregate = tf.zeros_like(inputs)
         if not prior:
-            prior = tf.ones(tf.shape(inputs))
+            prior = tf.ones_like(inputs)
         
         x = self.initial_bn(inputs, training=training)
         x_proc = self.initial_feature_transformer(x, training=training)
         _, x_a = self.split_layer(x_proc)
 
         for step in range(self.n_steps):
+            # step operations
             mask = self.step_attentive_transformers[step](x_a, 
                                                           prior=prior, 
                                                           training=training)
@@ -504,8 +429,18 @@ class TabNetEncoder(tf.keras.layers.Layer):
             x_proc = self.step_feature_transformers[step](masked_x, 
                                                           training=training)
             x_d, x_a = self.split_layer(x_proc)
-            step_out = tf.keras.activations.relu(x_d)
+            step_output = tf.keras.activations.relu(x_d)
 
+            # for prediction
+            step_output_aggregate = tf.reduce_sum(step_output_aggregate, step_output)
+
+            # for interpretability
+            step_coefficient = tf.math.reduce_sum(step_output, axis=-1)
+
+        
+        output_encoding = self.final_encoding(step_output_aggregate)
+
+        return output_encoding
 
 
 class TabNet(tf.keras.layers.Layer):
@@ -524,7 +459,6 @@ class TabNet(tf.keras.layers.Layer):
         epsilon: float = 1e-15, 
         virtual_batch_size: Optional[int] = None, 
         momentum: float = 0.98, 
-        groups: Optional[int] = None, 
         mask_type: str = "sparsemax", 
         **kwargs
     ):
@@ -570,12 +504,6 @@ class TabNet(tf.keras.layers.Layer):
             Momentum for exponential moving average in batch normalization. Lower values 
             correspond to larger impact of batch on the rolling statistics computed in 
             each batch. Valid values range from 0.0 to 1.0. Default (0.98).
-        groups: int
-            Number of groups for Group Normalization. Default (None) runs either regular 
-            batch normalization or Ghost Batch Normalization depending upon the value of 
-            virtual_batch_size. If an integer value is specified, Group Normalization is 
-            run with that number of groups. For Layer Normalization, set group=1. For 
-            Instance Normalization, set group=-1.
         mask_type: str
             mask_type ∈ {"softmax", "entmax", "sparsemax"}. Softmax generates a dense mask.
             Entmax (i.e. entmax 1.5) generates a slightly sparser mask. Sparsemax generates 

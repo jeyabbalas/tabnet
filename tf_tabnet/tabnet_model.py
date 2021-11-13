@@ -1,4 +1,4 @@
-from typing import Tuple, Optional, Union
+from typing import List, Tuple, Optional, Union
 
 import numpy as np
 import tensorflow as tf
@@ -10,6 +10,7 @@ class GLULayer(tf.keras.layers.Layer):
     def __init__(
             self, 
             units: int = 16, 
+            fc_layer: Optional[tf.keras.layers.Dense] = None,
             virtual_batch_size: Optional[int] = None, 
             momentum: float = 0.98, 
             **kwargs
@@ -22,6 +23,11 @@ class GLULayer(tf.keras.layers.Layer):
         -----------
         units: int
             Number of units in layer. Default (16).
+        fc_layer:tf.keras.layers.Dense
+            This is useful when you want to create a GLU layer with shared parameters. This 
+            is necessary because batch normalization should still be uniquely initialized 
+            due to the masked inputs in TabNet steps being in a different scale than the 
+            original input. Default (None) creates a new FC layer.
         virtual_batch_size: int
             Batch size for Ghost Batch Normalization (GBN). Value should be much smaller 
             than and a factor of the overall batch size. Default (None) runs regular batch 
@@ -37,87 +43,18 @@ class GLULayer(tf.keras.layers.Layer):
         self.virtual_batch_size = virtual_batch_size
         self.momentum = momentum
 
-        self.fc = tf.keras.layers.Dense(self.units*2, use_bias=False)
+        if fc_layer:
+            self.fc = fc_layer
+        else:
+            self.fc = tf.keras.layers.Dense(self.units*2, use_bias=False)
+        
         self.bn = tf.keras.layers.BatchNormalization(virtual_batch_size=self.virtual_batch_size, 
                                                      momentum=self.momentum)
     
-    def call(
-        self, 
-        inputs: Union[tf.Tensor, np.ndarray], 
-        training: Optional[bool] = None, 
-    ) -> tf.Tensor:
+    def call(self, inputs: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
         x = self.fc(inputs)
         x = self.bn(x, training=training)
         x = tf.math.multiply(x[:, :self.units], tf.nn.sigmoid(x[:, self.units:]))
-        return x
-
-
-class GLUBlock(tf.keras.layers.Layer):
-    def __init__(
-            self, 
-            n_glu_layers: int = 2, 
-            units: int = 16, 
-            virtual_batch_size: Optional[int] = None, 
-            momentum: float = 0.98, 
-            **kwargs
-    ):
-        """
-        Creates a sequence of n_glu_layers GLU layers with residual connections.
-
-        Parameters:
-        -----------
-        n_glu_layers: int
-            Number of GLU (FC-BN-GLU) layers. Should be greater than 0. Default (2).
-        units: int
-            Number of units in each GLU layer. Default (16).
-        virtual_batch_size: int
-            Batch size for Ghost Batch Normalization (GBN). Value should be much smaller 
-            than and a factor of the overall batch size. Default (None) runs regular batch 
-            normalization. If an integer value is specified, GBN is run with that virtual 
-            batch size.
-        momentum: float
-            Momentum for exponential moving average in batch normalization. Lower values 
-            correspond to larger impact of batch on the rolling statistics computed in 
-            each batch. Valid values range from 0.0 to 1.0. Default (0.98).
-        """
-        super(GLUBlock, self).__init__(**kwargs)
-        if n_glu_layers <= 0:
-            raise ValueError("Invalid Argument: Number of GLU layers should be greater than 0.")
-
-        self.units = units
-        self.norm_factor = tf.math.sqrt(tf.constant(0.5))
-
-        self.glu_layers = list()
-        for _ in range(n_glu_layers):
-            glu_layer = GLULayer(
-                units=self.units, 
-                virtual_batch_size=virtual_batch_size, 
-                momentum=momentum, 
-            )
-            self.glu_layers.append(glu_layer)
-    
-    def build(
-        self, 
-        input_shape: tf.TensorShape, 
-    ):
-        if input_shape[-1] != self.units:
-            self.omit_first_residual = True
-        else: 
-            self.omit_first_residual = False
-    
-    def call(
-        self, 
-        inputs: Union[tf.Tensor, np.ndarray], 
-        training: Optional[bool] = None, 
-    ) -> tf.Tensor:
-        for i, glu_layer in enumerate(self.glu_layers):
-            x = glu_layer(inputs, training=training)
-            if self.omit_first_residual and (i==0):
-                inputs = x
-            else:
-                x = tf.math.multiply(self.norm_factor, tf.math.add(inputs, x))
-                inputs = x
-        
         return x
 
 
@@ -125,14 +62,14 @@ class FeatureTransformer(tf.keras.layers.Layer):
     def __init__(
             self, 
             n_dependent_glus: int = 2, 
-            shared_layers: Optional[GLUBlock] = None, 
+            shared_glu_fc_layers: Optional[List[tf.keras.layers.Dense]] = None, 
             units: int = 16, 
             virtual_batch_size: Optional[int] = None, 
             momentum: float = 0.98, 
             **kwargs
     ):
         """
-        Creates a Feature Transformer for non-linear processing of features.
+        Creates a feature transformer for non-linear processing of features.
 
         Parameters:
         -----------
@@ -140,8 +77,10 @@ class FeatureTransformer(tf.keras.layers.Layer):
             Number of step-dependent GLU layers within the Feature Transformer. Increasing 
             the number of step-dependent layers is an effective strategy to improve predictive 
             performance. Default (2).
-        shared_layers: GLUBlock
-            GLU block that is shared among all feature transformers. Default (None).
+        shared_glu_fc_layers: List[tf.keras.layers.Dense]
+            A list of dense layers to construct shared GLU layers. Default (None) creates only 
+            n_dependent_glus dependent GLU layers and no shared layers. Total number of GLU layers 
+            in this feature transformer is len(shared_glu_layers) + n_dependent_glus.
         units: int
             Number of units in each GLU layer. Default (16).
         virtual_batch_size: int
@@ -155,26 +94,43 @@ class FeatureTransformer(tf.keras.layers.Layer):
             each batch. Valid values range from 0.0 to 1.0. Default (0.98).
         """
         super(FeatureTransformer, self).__init__(**kwargs)
-        self.shared_layers = shared_layers
-        self.dependent_layers = None
-        if n_dependent_glus > 0:
-            self.dependent_layers = GLUBlock(
-                n_glu_layers=n_dependent_glus, 
-                units=units, 
+        n_glu_layers = (len(shared_glu_fc_layers) if shared_glu_fc_layers else 0) + n_dependent_glus
+        if n_glu_layers <= 0:
+            raise ValueError("Invalid Argument: The number of GLU layers should be greater than 0.")
+        
+        self.units = units
+        self.norm_factor = tf.math.sqrt(tf.constant(0.5))
+
+        self.glu_layers = list()
+        for i in range(n_glu_layers):
+            fc_layer = None
+            if shared_glu_fc_layers:
+                if i < len(shared_glu_fc_layers):
+                    fc_layer = shared_glu_fc_layers[i]
+            
+            glu_layer = GLULayer(
+                units=self.units, 
+                fc_layer=fc_layer, 
                 virtual_batch_size=virtual_batch_size, 
                 momentum=momentum, 
             )
+            self.glu_layers.append(glu_layer)
     
-    def call(
-        self, 
-        inputs: Union[tf.Tensor, np.ndarray], 
-        training: Optional[bool] = None, 
-    ) -> tf.Tensor:
-        x = inputs
-        if self.shared_layers:
-            x = self.shared_layers(x, training=training)
-        if self.dependent_layers:
-            x = self.dependent_layers(x, training=training)
+    def build(self, input_shape: tf.TensorShape):
+        if input_shape[-1] != self.units:
+            self.omit_first_residual = True
+        else: 
+            self.omit_first_residual = False
+    
+    def call(self, inputs: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
+        for i, glu_layer in enumerate(self.glu_layers):
+            x = glu_layer(inputs, training=training)
+            if self.omit_first_residual and (i==0):
+                inputs = x
+            else:
+                x = tf.math.multiply(self.norm_factor, tf.math.add(inputs, x))
+                inputs = x
+
         return x
 
 
@@ -195,10 +151,7 @@ class Split(tf.keras.layers.Layer):
         super(Split, self).__init__(**kwargs)
         self.split_dim = split_dim
     
-    def call(
-        self, 
-        inputs: Union[tf.Tensor, np.ndarray], 
-    ) -> Tuple[tf.Tensor]:
+    def call(self, inputs: tf.Tensor) -> Tuple[tf.Tensor]:
         return inputs[:, :self.split_dim], inputs[:, self.split_dim:]
 
 
@@ -212,8 +165,8 @@ class AttentiveTransformer(tf.keras.layers.Layer):
         **kwargs
     ):
         """
-        Creates an Attentive Transformer that learns masks to select features 
-        to pay attention to for further analysis.
+        Creates an attentive transformer that learns masks to select salient features 
+        for further analysis.
 
         Parameters:
         -----------
@@ -236,35 +189,27 @@ class AttentiveTransformer(tf.keras.layers.Layer):
             To learn more, refer: https://arxiv.org/abs/1905.05702.
         """
         super(AttentiveTransformer, self).__init__(**kwargs)
-        self.virtual_batch_size = virtual_batch_size
-        self.momentum = momentum
-
         self.fc = tf.keras.layers.Dense(units, use_bias=False)
 
-        self.bn = tf.keras.layers.BatchNormalization(virtual_batch_size=self.virtual_batch_size, 
-                                                     momentum=self.momentum)
+        self.bn = tf.keras.layers.BatchNormalization(virtual_batch_size=virtual_batch_size, 
+                                                     momentum=momentum)
 
-        if mask_type == "sparsemax": # Sparsemax
-            self.sparse_activation = tfa.activations.sparsemax(axis=-1)
-        elif mask_type == "entmax": # Entmax 1.5
-            self.sparse_activation = entmax15(axis=-1)
-        elif mask_type == "softmax": # Softmax
-            self.sparse_activation = tf.nn.softmax(axis=-1)
+        if mask_type == "sparsemax":
+            self.sparse_activation = tfa.activations.sparsemax
+        elif mask_type == "entmax":
+            self.sparse_activation = entmax15
+        elif mask_type == "softmax":
+            self.sparse_activation = tf.nn.softmax
         else:
             raise NotImplementedError(
                 "Available options for mask_type: {'sparsemax', 'entmax', 'softmax'}"
             )
         
-    def call(
-        self, 
-        inputs: Union[tf.Tensor, np.ndarray], 
-        prior: Optional[Union[tf.Tensor, np.ndarray]], 
-        training: Optional[bool] = None, 
-    ) -> tf.Tensor:
+    def call(self, inputs: tf.Tensor, prior: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
         x = self.fc(inputs)
         x = self.bn(x, training=training)
         x = tf.multiply(prior, x)
-        x = self.sparse_activation(x)
+        x = self.sparse_activation(x, axis=-1)
         return x
 
 
@@ -348,36 +293,26 @@ class TabNetEncoder(tf.keras.layers.Layer):
         # plain batch normalization
         self.initial_bn = tf.keras.layers.BatchNormalization(momentum=self.momentum)
 
-        # shared glu block
-        self.shared_glu_block = None
-        if n_shared_glus > 0:
-            self.shared_glu_block = GLUBlock(
-                n_glu_layers=n_shared_glus, 
-                units=self.decision_dim+self.attention_dim, 
-                virtual_batch_size=self.virtual_batch_size, 
-                momentum=self.momentum, 
-            )
+        # shared glu layers
+        self.glu_dim = self.decision_dim + self.attention_dim
+        self.shared_glu_fc_layers = list()
+        for _ in range(n_shared_glus):
+            self.shared_glu_fc_layers.append(tf.keras.layers.Dense(units=self.glu_dim*2, use_bias=False))
         
         # initial feature transformer
         self.initial_feature_transformer = FeatureTransformer(
             n_dependent_glus=self.n_dependent_glus, 
-            shared_layers=self.shared_glu_block, 
-            units=self.decision_dim+self.attention_dim, 
+            shared_glu_fc_layers=self.shared_glu_fc_layers, 
+            units=self.glu_dim, 
             virtual_batch_size=self.virtual_batch_size, 
             momentum=self.momentum, 
             name="FeatureTransformer_Step_0", 
         )
 
         # split layer
-        self.split_layer = Split(split_dim=decision_dim)
-
-        # final encoding layer
-        self.final_encoding = tf.keras.layers.Dense(units=output_dim, bias=False)
+        self.split_layer = Split(split_dim=self.decision_dim)
     
-    def build(
-        self, 
-        input_shape: tf.TensorShape, 
-    ):
+    def build(self, input_shape: tf.TensorShape):
         input_dims = input_shape[-1]
 
         # feature and attentive transformers for each step
@@ -386,8 +321,8 @@ class TabNetEncoder(tf.keras.layers.Layer):
         for step in range(self.n_steps):
             feature_transformer = FeatureTransformer(
                 n_dependent_glus=self.n_dependent_glus, 
-                shared_layers=self.shared_glu_block, 
-                units=self.decision_dim+self.attention_dim, 
+                shared_glu_fc_layers=self.shared_glu_fc_layers, 
+                units=self.glu_dim, 
                 virtual_batch_size=self.virtual_batch_size, 
                 momentum=self.momentum, 
                 name=f"FeatureTransformer_Step_{(step+1)}", 
@@ -406,12 +341,8 @@ class TabNetEncoder(tf.keras.layers.Layer):
                 attentive_transformer
             )
 
-    def call(
-        self, 
-        inputs: Union[tf.Tensor, np.ndarray], 
-        prior: Union[tf.Tensor, np.ndarray] = None, 
-        training: Optional[bool] = None, 
-    ):
+    def call(self, inputs: tf.Tensor, prior: Optional[tf.Tensor] = None, 
+             training: Optional[bool] = None) -> tf.Tensor:
         step_output_aggregate = tf.zeros_like(inputs)
         if not prior:
             prior = tf.ones_like(inputs)
@@ -437,10 +368,30 @@ class TabNetEncoder(tf.keras.layers.Layer):
             # for interpretability
             step_coefficient = tf.math.reduce_sum(step_output, axis=-1)
 
-        
-        output_encoding = self.final_encoding(step_output_aggregate)
 
-        return output_encoding
+        return None
+
+
+class TabNetDecoder(tf.keras.layers.Layer):
+    def __init__(
+        self, 
+        reconstruction_dim: int, 
+        decision_dim: int = 8, 
+        n_shared_glus, 
+        n_dependent_glus, 
+        virtual_batch_size: Optional[int] = None, 
+        momentum: float = 0.98, 
+        **kwargs
+    ):
+        """
+        Creates a TabNet Decoder network.
+
+        Parameters
+        -----------
+        reconstruction_dim: int
+            Dimension of the decoder network's output layer.
+        """
+        super(TabNetDecoder, self).__init__(**kwargs)
 
 
 class TabNet(tf.keras.layers.Layer):

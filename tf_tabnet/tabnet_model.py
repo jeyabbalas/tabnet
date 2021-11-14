@@ -96,7 +96,8 @@ class FeatureTransformer(tf.keras.layers.Layer):
         super(FeatureTransformer, self).__init__(**kwargs)
         n_glu_layers = (len(shared_glu_fc_layers) if shared_glu_fc_layers else 0) + n_dependent_glus
         if n_glu_layers <= 0:
-            raise ValueError("Invalid Argument: The number of GLU layers should be greater than 0.")
+            raise ValueError("Invalid Argument: Total number of GLU layers in the feature transformer"
+            " should be greater than 0.")
         
         self.units = units
         self.norm_factor = tf.math.sqrt(tf.constant(0.5))
@@ -260,7 +261,7 @@ class TabNetEncoder(tf.keras.layers.Layer):
         **kwargs
     ):
         """
-        Creates a TabNet Encoder network.
+        Creates a TabNet encoder network.
 
         Parameters:
         -----------
@@ -311,8 +312,6 @@ class TabNetEncoder(tf.keras.layers.Layer):
         super(TabNetEncoder, self).__init__(**kwargs)
         self.n_steps = n_steps
         self.n_dependent_glus = n_dependent_glus
-        self.decision_dim = decision_dim
-        self.attention_dim = attention_dim
         self.relaxation_factor = relaxation_factor
         self.epsilon = epsilon
         self.virtual_batch_size = virtual_batch_size
@@ -324,7 +323,7 @@ class TabNetEncoder(tf.keras.layers.Layer):
         self.initial_bn = tf.keras.layers.BatchNormalization(momentum=self.momentum)
 
         # shared glu layers
-        self.glu_dim = self.decision_dim + self.attention_dim
+        self.glu_dim = decision_dim + attention_dim
         self.shared_glu_fc_layers = list()
         for _ in range(n_shared_glus):
             self.shared_glu_fc_layers.append(tf.keras.layers.Dense(units=self.glu_dim*2, use_bias=False))
@@ -340,7 +339,7 @@ class TabNetEncoder(tf.keras.layers.Layer):
         )
 
         # split layer
-        self.split_layer = Split(split_dim=self.decision_dim)
+        self.split_layer = Split(split_dim=decision_dim)
     
     def build(self, input_shape: tf.TensorShape):
         feature_dim = input_shape[-1]
@@ -435,6 +434,12 @@ class TabNetEncoder(tf.keras.layers.Layer):
             # update prior
             prior = tf.multiply(self.relaxation_factor - mask, prior)
         
+        # normalization
+        feature_attribution /= tf.reshape(
+            tf.reduce_sum(feature_attribution, axis=-1), 
+            shape=(-1,1)
+        )
+        
         return feature_attribution, masks
 
 
@@ -442,22 +447,94 @@ class TabNetDecoder(tf.keras.layers.Layer):
     def __init__(
         self, 
         reconstruction_dim: int, 
-        decision_dim: int = 8, 
-        n_shared_glus, 
-        n_dependent_glus, 
+        n_steps: int = 3, 
+        n_shared_glus: int = 1, 
+        n_dependent_glus: int = 1, 
         virtual_batch_size: Optional[int] = None, 
         momentum: float = 0.98, 
         **kwargs
     ):
         """
-        Creates a TabNet Decoder network.
+        Creates a TabNet decoder network.
 
         Parameters
         -----------
         reconstruction_dim: int
             Dimension of the decoder network's output layer.
+        n_steps: int
+            Number of sequential attention steps. Typically ranges from 3 to 10. If the 
+            data has more informative features, the number of steps is higher. Large 
+            values may lead to overfitting. Default (3).
+        n_shared_glus: int
+            Number of shared GLU layers within the Feature Transformer. Increasing the 
+            number of shared layers is an effective strategy to improve predictive performance 
+            without a significant increase in the number of parameters. Default (2).
+        n_dependent_glus: int
+            Number of step-dependent GLU layers within the Feature Transformer. Increasing 
+            the number of step-dependent layers is an effective strategy to improve predictive 
+            performance. Default (2).
+        virtual_batch_size: int
+            Batch size for Ghost Batch Normalization (GBN). Value should be much smaller 
+            than and a factor of the overall batch size. Default (None) runs regular batch 
+            normalization. If an integer value is specified, GBN is run with that virtual 
+            batch size.
+        momentum: float
+            Momentum for exponential moving average in batch normalization. Lower values 
+            correspond to larger impact of batch on the rolling statistics computed in 
+            each batch. Valid values range from 0.0 to 1.0. Default (0.98).
         """
         super(TabNetDecoder, self).__init__(**kwargs)
+        self.reconstruction_dim = reconstruction_dim
+        self.n_steps = n_steps
+        self.n_shared_glus = n_shared_glus
+        self.n_dependent_glus = n_dependent_glus
+        self.virtual_batch_size = virtual_batch_size
+        self.momentum = momentum
+    
+    def build(self, input_shape: tf.TensorShape):
+        latent_dim = input_shape[-1]
+
+        # shared glu layers
+        self.shared_glu_fc_layers = list()
+        for _ in range(self.n_shared_glus):
+            self.shared_glu_fc_layers.append(tf.keras.layers.Dense(units=latent_dim*2, use_bias=False))
+        
+        # feature and attentive transformers for each step
+        self.step_feature_transformers = list()
+        self.step_fc_layers = list()
+        for step in range(self.n_steps):
+            feature_transformer = FeatureTransformer(
+                n_dependent_glus=self.n_dependent_glus, 
+                shared_glu_fc_layers=self.shared_glu_fc_layers, 
+                units=latent_dim, 
+                virtual_batch_size=self.virtual_batch_size, 
+                momentum=self.momentum, 
+                name=f"FeatureTransformer_Decoder_Step_{(step+1)}", 
+            )
+            fc_layer = tf.keras.layers.Dense(
+                units=self.reconstruction_dim, 
+                use_bias=False, 
+                name=f"FC_Decoder_Step_{(step+1)}", 
+            )
+            self.step_feature_transformers.append(
+                feature_transformer
+            )
+            self.step_fc_layers.append(
+                fc_layer
+            )
+
+    def call(self, inputs: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
+        batch_dim = tf.shape(inputs)[-1]
+        reconstructed_features = tf.zeros((batch_dim, self.reconstruction_dim))
+
+        for step in range(self.n_steps):
+            # step operation
+            x = self.step_feature_transformers[step](inputs, 
+                                                     training=False)
+            x = self.step_fc_layers[step](inputs)
+            reconstructed_features += x
+        
+        return reconstructed_features
 
 
 class TabNet(tf.keras.layers.Layer):

@@ -159,6 +159,9 @@ class AttentiveTransformer(tf.keras.layers.Layer):
     def __init__(
         self, 
         units: int, 
+        n_steps: int = 3, 
+        epsilon: float = 1e-15, 
+        lambda_sparse: float = 1e-3, 
         virtual_batch_size: Optional[int] = None, 
         momentum: float = 0.98, 
         mask_type: str = "sparsemax", 
@@ -173,6 +176,15 @@ class AttentiveTransformer(tf.keras.layers.Layer):
         units: int
             Number of units in layer. This layer outputs a mask for your data, so the 
             number of units should be the same as your data dimension.
+        n_steps: int
+            Number of sequential attention steps. Typically ranges from 3 to 10. If the 
+            data has more informative features, the number of steps is higher. Large 
+            values may lead to overfitting. Default (3).
+        epsilon: float
+            Prevent computing log(0) by adding a small constant log(0+epsilon). Default (1e-15).
+        lambda_sparse: float
+            Coefficient for the mask sparsity loss. Important parameter to tune. Lower values 
+            lead to better performance. Default (1e-3).
         virtual_batch_size: int
             Batch size for Ghost Batch Normalization (GBN). Value should be much smaller 
             than and a factor of the overall batch size. Default (None) runs regular batch 
@@ -189,6 +201,12 @@ class AttentiveTransformer(tf.keras.layers.Layer):
             To learn more, refer: https://arxiv.org/abs/1905.05702.
         """
         super(AttentiveTransformer, self).__init__(**kwargs)
+        # for computing sparsity regularization loss
+        self.n_steps = n_steps
+        self.epsilon = epsilon
+        self.lambda_sparse = lambda_sparse
+
+        # attentive transformer layers
         self.fc = tf.keras.layers.Dense(units, use_bias=False)
 
         self.bn = tf.keras.layers.BatchNormalization(virtual_batch_size=virtual_batch_size, 
@@ -210,13 +228,23 @@ class AttentiveTransformer(tf.keras.layers.Layer):
         x = self.bn(x, training=training)
         x = tf.multiply(prior, x)
         x = self.sparse_activation(x, axis=-1)
+
+        # add sparsity loss from current mask
+        sparsity_reg_loss = tf.reduce_mean(
+            tf.reduce_sum(
+                tf.multiply(-x, tf.math.log(x+self.epsilon)), 
+                axis=-1
+            )
+        )
+        sparsity_reg_loss /= self.n_steps
+        self.add_loss(self.lambda_sparse*sparsity_reg_loss)
+        
         return x
 
 
 class TabNetEncoder(tf.keras.layers.Layer):
     def __init__(
         self, 
-        output_dim: int, 
         decision_dim: int = 8, 
         attention_dim: int = 8, 
         n_steps: int = 3, 
@@ -235,8 +263,6 @@ class TabNetEncoder(tf.keras.layers.Layer):
 
         Parameters:
         -----------
-        output_dim: int
-            Dimension of the network's output layer.
         decision_dim: int
             Dimension of the decision layer. Typically ranges from 8 to 128. Assuming 
             decision_dim to be equal to attention_dim is sensible. Large values may lead 
@@ -262,7 +288,7 @@ class TabNetEncoder(tf.keras.layers.Layer):
             layers. Typically ranges from 1.0 to 2.0. This is an important hyperparameter 
             to tune in TabNets. Default (1.3).
         epsilon: float
-            Tiny number to prevent computing log(0).
+            Prevent computing log(0) by adding a small constant log(0+epsilon). Default (1e-15).
         virtual_batch_size: int
             Batch size for Ghost Batch Normalization (GBN). Value should be much smaller 
             than and a factor of the overall batch size. Default (None) runs regular batch 
@@ -286,9 +312,12 @@ class TabNetEncoder(tf.keras.layers.Layer):
         self.n_dependent_glus = n_dependent_glus
         self.decision_dim = decision_dim
         self.attention_dim = attention_dim
+        self.relaxation_factor = relaxation_factor
+        self.epsilon = epsilon
         self.virtual_batch_size = virtual_batch_size
         self.momentum = momentum
         self.mask_type = mask_type
+        self.lambda_sparse = lambda_sparse
 
         # plain batch normalization
         self.initial_bn = tf.keras.layers.BatchNormalization(momentum=self.momentum)
@@ -313,7 +342,7 @@ class TabNetEncoder(tf.keras.layers.Layer):
         self.split_layer = Split(split_dim=self.decision_dim)
     
     def build(self, input_shape: tf.TensorShape):
-        input_dims = input_shape[-1]
+        feature_dim = input_shape[-1]
 
         # feature and attentive transformers for each step
         self.step_feature_transformers = list()
@@ -328,7 +357,10 @@ class TabNetEncoder(tf.keras.layers.Layer):
                 name=f"FeatureTransformer_Step_{(step+1)}", 
             )
             attentive_transformer = AttentiveTransformer(
-                units=input_dims, 
+                units=feature_dim, 
+                n_steps=self.n_steps, 
+                epsilon=self.epsilon, 
+                lambda_sparse=self.lambda_sparse, 
                 virtual_batch_size=self.virtual_batch_size, 
                 momentum=self.momentum, 
                 mask_type = self.mask_type, 
@@ -344,7 +376,8 @@ class TabNetEncoder(tf.keras.layers.Layer):
     def call(self, inputs: tf.Tensor, prior: Optional[tf.Tensor] = None, 
              training: Optional[bool] = None) -> tf.Tensor:
         step_output_aggregate = tf.zeros_like(inputs)
-        if not prior:
+        
+        if prior is None:
             prior = tf.ones_like(inputs)
         
         x = self.initial_bn(inputs, training=training)
@@ -369,7 +402,7 @@ class TabNetEncoder(tf.keras.layers.Layer):
             step_coefficient = tf.math.reduce_sum(step_output, axis=-1)
 
 
-        return None
+        return step_output_aggregate
 
 
 class TabNetDecoder(tf.keras.layers.Layer):

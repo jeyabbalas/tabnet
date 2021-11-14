@@ -1,4 +1,4 @@
-from typing import List, Tuple, Optional, Union
+from typing import List, Tuple, Optional
 
 import numpy as np
 import tensorflow as tf
@@ -169,7 +169,8 @@ class AttentiveTransformer(tf.keras.layers.Layer):
     ):
         """
         Creates an attentive transformer that learns masks to select salient features 
-        for further analysis.
+        for further analysis. This layer propagates the sparsity regularization loss 
+        to the Keras model/layer that calls this layer.
 
         Parameters:
         -----------
@@ -205,7 +206,7 @@ class AttentiveTransformer(tf.keras.layers.Layer):
         self.n_steps = n_steps
         self.epsilon = epsilon
         self.lambda_sparse = lambda_sparse
-
+        
         # attentive transformer layers
         self.fc = tf.keras.layers.Dense(units, use_bias=False)
 
@@ -229,7 +230,7 @@ class AttentiveTransformer(tf.keras.layers.Layer):
         x = tf.multiply(prior, x)
         x = self.sparse_activation(x, axis=-1)
 
-        # add sparsity loss from current mask
+        # propagate sparsity loss from current mask
         sparsity_reg_loss = tf.reduce_mean(
             tf.reduce_sum(
                 tf.multiply(-x, tf.math.log(x+self.epsilon)), 
@@ -238,7 +239,7 @@ class AttentiveTransformer(tf.keras.layers.Layer):
         )
         sparsity_reg_loss /= self.n_steps
         self.add_loss(self.lambda_sparse*sparsity_reg_loss)
-        
+
         return x
 
 
@@ -374,8 +375,9 @@ class TabNetEncoder(tf.keras.layers.Layer):
             )
 
     def call(self, inputs: tf.Tensor, prior: Optional[tf.Tensor] = None, 
-             training: Optional[bool] = None) -> tf.Tensor:
+             training: Optional[bool] = None) -> Tuple[tf.Tensor]:
         step_output_aggregate = tf.zeros_like(inputs)
+        feature_attribution = tf.zeros_like(inputs)
         
         if prior is None:
             prior = tf.ones_like(inputs)
@@ -396,13 +398,19 @@ class TabNetEncoder(tf.keras.layers.Layer):
             step_output = tf.keras.activations.relu(x_d)
 
             # for prediction
-            step_output_aggregate = tf.reduce_sum(step_output_aggregate, step_output)
+            step_output_aggregate += step_output
 
             # for interpretability
-            step_coefficient = tf.math.reduce_sum(step_output, axis=-1)
+            step_coefficient = tf.reshape(
+                tf.math.reduce_sum(step_output, axis=-1), 
+                shape=(-1,1)
+            )
+            feature_attribution += tf.multiply(step_coefficient, mask)
 
+            # update prior
+            prior = tf.multiply(self.relaxation_factor - mask, prior)
 
-        return step_output_aggregate
+        return step_output_aggregate, feature_attribution
 
 
 class TabNetDecoder(tf.keras.layers.Layer):

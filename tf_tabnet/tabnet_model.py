@@ -1,4 +1,4 @@
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import tensorflow as tf
@@ -375,9 +375,8 @@ class TabNetEncoder(tf.keras.layers.Layer):
             )
 
     def call(self, inputs: tf.Tensor, prior: Optional[tf.Tensor] = None, 
-             training: Optional[bool] = None) -> Tuple[tf.Tensor]:
+             training: Optional[bool] = None) -> tf.Tensor:
         step_output_aggregate = tf.zeros_like(inputs)
-        feature_attribution = tf.zeros_like(inputs)
         
         if prior is None:
             prior = tf.ones_like(inputs)
@@ -400,17 +399,43 @@ class TabNetEncoder(tf.keras.layers.Layer):
             # for prediction
             step_output_aggregate += step_output
 
-            # for interpretability
+            # update prior
+            prior = tf.multiply(self.relaxation_factor - mask, prior)
+
+        return step_output_aggregate
+    
+    def calculate_feature_attribution(self, inputs: tf.Tensor) -> Tuple[tf.Tensor, Dict[int, tf.Tensor]]:
+        feature_attribution = tf.zeros_like(inputs)
+        masks = dict()
+        prior = tf.ones_like(inputs)
+        
+        x = self.initial_bn(inputs, training=False)
+        x_proc = self.initial_feature_transformer(x, training=False)
+        _, x_a = self.split_layer(x_proc)
+
+        for step in range(self.n_steps):
+            # step operations
+            mask = self.step_attentive_transformers[step](x_a, 
+                                                          prior=prior, 
+                                                          training=False)
+            masked_x = tf.multiply(mask, x)
+            x_proc = self.step_feature_transformers[step](masked_x, 
+                                                          training=False)
+            x_d, x_a = self.split_layer(x_proc)
+            step_output = tf.keras.activations.relu(x_d)
+
+            # for interpretation
+            masks[step] = mask
             step_coefficient = tf.reshape(
                 tf.math.reduce_sum(step_output, axis=-1), 
                 shape=(-1,1)
             )
             feature_attribution += tf.multiply(step_coefficient, mask)
-
+            
             # update prior
             prior = tf.multiply(self.relaxation_factor - mask, prior)
-
-        return step_output_aggregate, feature_attribution
+        
+        return feature_attribution, masks
 
 
 class TabNetDecoder(tf.keras.layers.Layer):

@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 
 import numpy as np
 import tensorflow as tf
@@ -537,13 +537,30 @@ class TabNetDecoder(tf.keras.layers.Layer):
         return reconstructed_features
 
 
+class EmbeddingGenerator(tf.keras.layers.Layer):
+    def __init__(
+        self, 
+        categorical_indices: List[int], 
+        categorical_dims: List[int], 
+        categorical_embed_dims: Union[int, List[int]], 
+        **kwargs
+    ):
+        """
+        Converts a feature space into an embedding space.
+
+        Parameters
+        -----------
+        """
+        super(EmbeddingGenerator, self).__init__(**kwargs)
+
+
 class TabNet(tf.keras.layers.Layer):
     def __init__(
         self, 
         output_dim: int, 
-        categorical_idxs=[], 
-        categorical_dim=[], 
-        categorical_embedding_dim=1, 
+        categorical_idxs = [], 
+        categorical_dim = [], 
+        categorical_embedding_dim = 1, 
         decision_dim: int = 8, 
         attention_dim: int = 8, 
         n_steps: int = 3, 
@@ -603,7 +620,7 @@ class TabNet(tf.keras.layers.Layer):
             Entmax (i.e. entmax 1.5) generates a slightly sparser mask. Sparsemax generates 
             a highly sparse mask. To learn more, refer: https://arxiv.org/abs/1905.05702.
         """
-        super(TabNetEncoder, self).__init__(**kwargs)
+        super(TabNet, self).__init__(**kwargs)
         self.n_steps = n_steps
 
         self._verify_parameters()

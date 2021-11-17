@@ -310,6 +310,7 @@ class TabNetEncoder(tf.keras.layers.Layer):
             lead to better performance. Default (1e-3).
         """
         super(TabNetEncoder, self).__init__(**kwargs)
+        self.decision_dim = decision_dim
         self.n_steps = n_steps
         self.n_dependent_glus = n_dependent_glus
         self.relaxation_factor = relaxation_factor
@@ -375,7 +376,8 @@ class TabNetEncoder(tf.keras.layers.Layer):
 
     def call(self, inputs: tf.Tensor, prior: Optional[tf.Tensor] = None, 
              training: Optional[bool] = None) -> tf.Tensor:
-        step_output_aggregate = tf.zeros_like(inputs)
+        batch_size = tf.shape(inputs)[0]
+        step_output_aggregate = tf.zeros((batch_size, self.decision_dim))
         
         if prior is None:
             prior = tf.ones_like(inputs)
@@ -523,7 +525,7 @@ class TabNetDecoder(tf.keras.layers.Layer):
                 fc_layer
             )
 
-    def call(self, inputs: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
+    def call(self, inputs: tf.Tensor) -> tf.Tensor:
         batch_dim = tf.shape(inputs)[-1]
         reconstructed_features = tf.zeros((batch_dim, self.reconstruction_dim))
 

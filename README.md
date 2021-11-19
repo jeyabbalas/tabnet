@@ -5,11 +5,15 @@ A TensorFlow 2 Keras implementation of TabNet from the paper: [TabNet: Attentive
 
 This implementation closely follows [the TabNet implementation in PyTorch linked here](https://github.com/dreamquark-ai/tabnet/tree/b6e1ebaf694f37ad40a6ba525aa016fd3cec15da). The description of that implementation is [explained in this helpful video by Sebastian Fischman](https://www.youtube.com/watch?v=ysBaZO8YmX8). In my opinion, this is the most reliable and flexible implementation of TabNet that I could find. I was unable to find any good, reliable, and flexible implementation of TabNet in TensorFlow.
 
-I re-implement TabNet in TensorFlow 2 Keras here mainly to enable the re-use and experimentation with this architecture from within the TensorFlow ecosystem and to be able to take advantage of the Keras API.
+I re-implement TabNet in TensorFlow 2 Keras here mainly to enable the re-use and experimentation with this architecture from within the TensorFlow ecosystem and to be able to take advantage of the Keras API. 
 
 ## Usage
 
 
 
 
+
+
+
+In the TabNet paper, all categorical variables were mapped to an embedded space with one dimension each. I do not provide such an embedding layer because [integer mapping](https://www.tensorflow.org/guide/keras/preprocessing_layers#categorical_features_preprocessing) done before the embedding is a CPU operation and is [best done as a preprocessing step using the TF data API](https://www.tensorflow.org/guide/keras/preprocessing_layers#preprocessing_data_before_the_model_or_inside_the_model). It also allows us some flexibility on how we want to process the input. While deploying, the preprocessing layer can be added to the inference model. For a concrete example using TabNet, please see the notebook: 
 

@@ -1,6 +1,5 @@
 from typing import Dict, List, Tuple, Optional, Union
 
-import numpy as np
 import tensorflow as tf
 import tensorflow_addons as tfa
 from utils import entmax15
@@ -537,3 +536,25 @@ class TabNetDecoder(tf.keras.layers.Layer):
             reconstructed_features += x
         
         return reconstructed_features
+
+
+class TabularEmbedding(tf.keras.layers.Layer):
+    def __init__(
+        self, 
+        feature_names: List[str], 
+        categorical_str_indices: List[int], 
+        categorical_dims: List[int], 
+        categorical_embed_dims: Union[int, List[int]], 
+        **kwargs
+    ):
+        """
+        Creates an embedding layer for categorical variables. Numerical variables are 
+        untouched.
+
+        Parameters
+        -----------
+        feature_names: List[str]
+            A list of feature names in order that they are expected to be input into the 
+        """
+        super(TabularEmbedding, self).__init__(**kwargs)
+

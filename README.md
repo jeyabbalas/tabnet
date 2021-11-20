@@ -15,5 +15,5 @@ I re-implement TabNet in TensorFlow 2 Keras here mainly to enable the re-use and
 
 
 
-In the TabNet paper, all categorical variables were mapped to an embedded space with one dimension each. I do not provide such an embedding layer because [integer mapping](https://www.tensorflow.org/guide/keras/preprocessing_layers#categorical_features_preprocessing) done before the embedding is a CPU operation and is [best done as a preprocessing step using the TF data API](https://www.tensorflow.org/guide/keras/preprocessing_layers#preprocessing_data_before_the_model_or_inside_the_model). It also allows us some flexibility on how we want to process the input. While deploying, the preprocessing layer can be added to the inference model. For a concrete example using TabNet, please see the notebook: 
+
 

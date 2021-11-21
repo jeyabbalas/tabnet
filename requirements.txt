@@ -60,6 +60,7 @@ pandocfilters==1.5.0
 parso==0.8.2
 pexpect==4.8.0
 pickleshare==0.7.5
+plotly==5.4.0
 prometheus-client==0.12.0
 prompt-toolkit==3.0.22
 protobuf==3.19.1
@@ -81,6 +82,7 @@ rsa==4.7.2
 Send2Trash==1.8.0
 six==1.16.0
 sniffio==1.2.0
+tenacity==8.0.1
 tensorboard==2.7.0
 tensorboard-data-server==0.6.1
 tensorboard-plugin-wit==1.8.0

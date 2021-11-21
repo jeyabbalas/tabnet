@@ -17,3 +17,6 @@ I re-implement TabNet in TensorFlow 2 Keras here mainly to enable the re-use and
 
 
 
+## Note
+
+The current TensorFlow implementation of [Ghost Batch Normalization](https://arxiv.org/abs/1705.08741) requires the virtual batch size to be a factor of the overall batch size even at inference time. This implementation is incorrect. As a result, I don't recommend using Ghost Batch Normalization (by setting TabNet parameter `virtual_batch_size = None`). [Track this issue here](https://github.com/tensorflow/tensorflow/issues/23050).
